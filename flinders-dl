@@ -1,0 +1,97 @@
+#!/bin/bash
+
+#Exit if there's an error
+set -e
+
+#if no input is given, say how to use the program
+if [ -z $1 ]; then
+	echo "Usage: flinders-dl [html file] [year] audio"
+	echo "html file: Downloaded web page of lecture recording"
+	echo "year: Year of lecture recording (Optional, defaults to current year)"
+	echo "audio: Download only the audio (Optional, default is off)"
+	echo ""
+	echo "Examples:"
+	echo "    flinders-dl EXPL1234.html audio"
+	echo "    Will download only the audio of the EXPL1234 lecture"
+	echo ""
+	echo "    flinders-dl EXPL1234.html 2018"
+	echo "    Will download the video of the EXPL1234 lecture from 2018"
+	echo ""
+	echo "    flinders-dl EXPL1234.html"
+	echo "    Will download the video of the EXPL1234 lecture from the current year"
+	echo ""
+	echo "Note: If only downloading the audio, specifying the year is unnecessary"
+	exit
+else
+	htmlfile=$1
+fi
+
+#Find the name of the lecture
+filename=$(cat $1 | grep \<title\> | sed -e 's/    <title>//g' | sed -e 's/<\/title>//g')
+
+#If no year is specified, set 'year' to the current year
+#If 'audio' is specified, set 'audioonly' to 1
+audioonly=0
+if [ -z $2 ]; then
+	year=$(date +%Y)
+elif [ "$2" == "audio" ] || [ "$3" == "audio" ]; then
+	audioonly=1
+else
+	year=$2
+fi
+
+#Find the mp3 file whos name is the special code for the lecture
+mp3=$(cat "$htmlfile" | grep -o -P '.{0,6}\.mp3' | head -n 1)
+
+#Download the audio if 'audio' is specified
+if [ ${audioonly} == 1 ]; then
+	echo "Downloading the audio..."
+	wget -q -O "${filename}.mp3" https://video.flinders.edu.au/mp3/${mp3}
+	rm -rf "${htmlfile}" $(echo "${htmlfile}" | sed -e 's/.html//g')_file
+	echo "Done!"
+	exit
+fi
+
+#Set 'plid' as the name of the mp3 file, without the .mp3 suffix
+plid=$(echo $mp3 | cut -d "." -f 1)
+
+#Download the playlist file which contains a unique, randomly generated code for the video itself
+echo "Downloading lecture ID..."
+wget -q https://video.flinders.edu.au:8443/vod/_definst_/mp4:lectures_${year}/${plid}_lan.mp4/playlist.m3u8
+
+#Set 'tsid' as that unique code
+tsid=$(cat playlist.m3u8 | grep chunklist | cut -d "_" -f 2 | cut -d "." -f 1)
+
+#Download list of files that make up the  video
+echo "Downloading file list..."
+wget -q https://video.flinders.edu.au:8443/vod/_definst_/mp4:lectures_${year}/${plid}_lan.mp4/chunklist_${tsid}.m3u8
+
+#Remove unnecessary information, leaving only the list of files
+cat chunklist_${tsid}.m3u8 | grep ts > ts.txt
+
+#Make a folder to put all the parts into
+mkdir ${plid}
+
+#Download all the parts of the video listed in the list of files, showing progress
+echo "Downloading lecture parts..."
+part=1
+parts=$(wc -l < ts.txt)
+for file in $(cat ts.txt); do
+	echo Downloading part ${part}/${parts}
+	wget -q -O ${plid}/${file} https://video.flinders.edu.au:8443/vod/_definst_/mp4:lectures_${year}/${plid}_lan.mp4/${file}
+	part=$((${part} + 1))
+done
+
+#Concatinate all the parts of the video into one big file
+for file in $(cat ts.txt); do
+	cat ${plid}/${file} >> ${plid}/${plid}.ts
+done
+
+#Convert the lecture to an mp4 file with the proper name of the lecture
+echo "Putting it all together..."
+ffmpeg -loglevel panic -i ${plid}/${plid}.ts -acodec copy -vcodec copy "${filename}.mp4"
+
+#Remove all the files created and other unnecessary files/folders
+echo "Cleaning up..."
+rm -rf ${plid} chunklist_${tsid}.m3u8 playlist.m3u8 ts.txt "${htmlfile}" $(echo "${htmlfile}" | sed -e 's/.html//g')_files
+echo "Done!"
